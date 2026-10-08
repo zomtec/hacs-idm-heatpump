@@ -3,8 +3,7 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum, IntEnum, IntFlag
-from inspect import signature
-from typing import Generic, TypeVar
+from typing import Generic, Literal, TypeVar
 
 from homeassistant.components.binary_sensor import (
     BinarySensorDeviceClass,
@@ -23,7 +22,8 @@ from homeassistant.const import (
     UnitOfPower,
     UnitOfTemperature,
 )
-from pymodbus.client.mixin import ModbusClientMixin
+from modbus_connection.decode import decode_float32, decode_int16, decode_uint16
+from modbus_connection.encode import encode_float32, encode_int16, encode_uint16
 
 from .const import (
     CONF_DISPLAY_NAME,
@@ -49,6 +49,7 @@ from .logger import LOGGER
 _T = TypeVar("_T")
 _EnumT = TypeVar("_EnumT", bound=IntEnum)
 _FlagT = TypeVar("_FlagT", bound=IntFlag)
+_DataType = Literal["float32", "int16", "uint16"]
 
 
 @dataclass(kw_only=True)
@@ -63,46 +64,27 @@ class BaseSensorAddress(ABC, Generic[_T]):
     @property
     def size(self) -> int:
         """Get number of registers this sensor's value occupies."""
-        return self.datatype.value[1]
+        return 2 if self.datatype == "float32" else 1
 
     @property
     @abstractmethod
-    def datatype(self) -> ModbusClientMixin.DATATYPE:
-        """Get the pymodbus datatype for this sensor."""
+    def datatype(self) -> _DataType:
+        """Get the register datatype for this sensor."""
 
-    def _decode_raw(self, registers: list[int]):
+    def _decode_raw(self, registers: list[int]) -> int | float:
         assert len(registers) == self.size
-        if (
-            "word_order"
-            in signature(ModbusClientMixin.convert_from_registers).parameters
-        ):
-            return ModbusClientMixin.convert_from_registers(
-                registers=registers,
-                data_type=self.datatype,
-                word_order="little",
-            )
-        else:
-            return ModbusClientMixin.convert_from_registers(
-                registers=list(reversed(registers)),
-                data_type=self.datatype,
-            )
+        if self.datatype == "float32":
+            return decode_float32(registers, word_order="little")
+        if self.datatype == "int16":
+            return decode_int16(registers)
+        return decode_uint16(registers)
 
     def _encode_raw(self, value: int | float) -> list[int]:
-        if "word_order" in signature(ModbusClientMixin.convert_to_registers).parameters:
-            return ModbusClientMixin.convert_to_registers(
-                value=value,
-                data_type=self.datatype,
-                word_order="little",
-            )
-        else:
-            return list(
-                reversed(
-                    ModbusClientMixin.convert_to_registers(
-                        value=value,
-                        data_type=self.datatype,
-                    )
-                )
-            )
+        if self.datatype == "float32":
+            return encode_float32(float(value), word_order="little")
+        if self.datatype == "int16":
+            return encode_int16(int(value))
+        return encode_uint16(int(value))
 
     @abstractmethod
     def decode(self, registers: list[int]) -> tuple[bool, _T]:
@@ -145,9 +127,9 @@ class IdmBinarySensorAddress(BaseSensorAddress[bool]):
     device_class: BinarySensorDeviceClass | None = None
 
     @property
-    def datatype(self) -> ModbusClientMixin.DATATYPE:
-        """Get the pymodbus datatype for this sensor."""
-        return ModbusClientMixin.DATATYPE.UINT16
+    def datatype(self) -> _DataType:
+        """Get the register datatype for this sensor."""
+        return "uint16"
 
     def decode(self, registers: list[int]) -> tuple[bool, bool]:
         """Decode this sensor's value."""
@@ -179,9 +161,9 @@ class _FloatSensorAddress(IdmSensorAddress[float]):
     max_value: float | None = None
 
     @property
-    def datatype(self) -> ModbusClientMixin.DATATYPE:
-        """Get the pymodbus datatype for this sensor."""
-        return ModbusClientMixin.DATATYPE.FLOAT32
+    def datatype(self) -> _DataType:
+        """Get the register datatype for this sensor."""
+        return "float32"
 
     def decode(self, registers: list[int]) -> tuple[bool, float]:
         raw_value = self._decode_raw(registers)
@@ -225,9 +207,9 @@ class _UCharSensorAddress(IdmSensorAddress[int]):
     max_value: int | None = 0xFFFE
 
     @property
-    def datatype(self) -> ModbusClientMixin.DATATYPE:
-        """Get the pymodbus datatype for this sensor."""
-        return ModbusClientMixin.DATATYPE.UINT16
+    def datatype(self) -> _DataType:
+        """Get the register datatype for this sensor."""
+        return "uint16"
 
     def decode(self, registers: list[int]) -> tuple[bool, int]:
         value = self._decode_raw(registers)
@@ -269,9 +251,9 @@ class _WordSensorAddress(IdmSensorAddress[int]):
     max_value: int | None = None
 
     @property
-    def datatype(self) -> ModbusClientMixin.DATATYPE:
-        """Get the pymodbus datatype for this sensor."""
-        return ModbusClientMixin.DATATYPE.INT16
+    def datatype(self) -> _DataType:
+        """Get the register datatype for this sensor."""
+        return "int16"
 
     def decode(self, registers: list[int]) -> tuple[bool, int]:
         value = self._decode_raw(registers)
@@ -311,9 +293,9 @@ class _EnumSensorAddress(IdmSensorAddress[_EnumT], Generic[_EnumT]):
     enum: type[_EnumT]
 
     @property
-    def datatype(self) -> ModbusClientMixin.DATATYPE:
-        """Get the pymodbus datatype for this sensor."""
-        return ModbusClientMixin.DATATYPE.UINT16
+    def datatype(self) -> _DataType:
+        """Get the register datatype for this sensor."""
+        return "uint16"
 
     def decode(self, registers: list[int]) -> tuple[bool, _EnumT]:
         value = self._decode_raw(registers)
@@ -345,9 +327,9 @@ class _BitFieldSensorAddress(IdmSensorAddress[_FlagT], Generic[_FlagT]):
     flag: type[_FlagT]
 
     @property
-    def datatype(self) -> ModbusClientMixin.DATATYPE:
-        """Get the pymodbus datatype for this sensor."""
-        return ModbusClientMixin.DATATYPE.UINT16
+    def datatype(self) -> _DataType:
+        """Get the register datatype for this sensor."""
+        return "uint16"
 
     def decode(self, registers: list[int]) -> tuple[bool, _FlagT]:
         value = self._decode_raw(registers)
