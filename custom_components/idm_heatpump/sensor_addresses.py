@@ -3,7 +3,7 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum, IntEnum, IntFlag
-from typing import Generic, Literal, TypeVar
+from typing import Generic, TypeVar
 
 from homeassistant.components.binary_sensor import (
     BinarySensorDeviceClass,
@@ -49,7 +49,6 @@ from .logger import LOGGER
 _T = TypeVar("_T")
 _EnumT = TypeVar("_EnumT", bound=IntEnum)
 _FlagT = TypeVar("_FlagT", bound=IntFlag)
-_DataType = Literal["float32", "int16", "uint16"]
 
 
 @dataclass(kw_only=True)
@@ -64,27 +63,12 @@ class BaseSensorAddress(ABC, Generic[_T]):
     @property
     def size(self) -> int:
         """Get number of registers this sensor's value occupies."""
-        return 2 if self.datatype == "float32" else 1
+        return 2 if self.is_float else 1
 
     @property
-    @abstractmethod
-    def datatype(self) -> _DataType:
-        """Get the register datatype for this sensor."""
-
-    def _decode_raw(self, registers: list[int]) -> int | float:
-        assert len(registers) == self.size
-        if self.datatype == "float32":
-            return decode_float32(registers, word_order="little")
-        if self.datatype == "int16":
-            return decode_int16(registers)
-        return decode_uint16(registers)
-
-    def _encode_raw(self, value: int | float) -> list[int]:
-        if self.datatype == "float32":
-            return encode_float32(float(value), word_order="little")
-        if self.datatype == "int16":
-            return encode_int16(int(value))
-        return encode_uint16(int(value))
+    def is_float(self) -> bool:
+        """Whether this sensor uses floating-point values."""
+        return False
 
     @abstractmethod
     def decode(self, registers: list[int]) -> tuple[bool, _T]:
@@ -126,20 +110,16 @@ class IdmBinarySensorAddress(BaseSensorAddress[bool]):
 
     device_class: BinarySensorDeviceClass | None = None
 
-    @property
-    def datatype(self) -> _DataType:
-        """Get the register datatype for this sensor."""
-        return "uint16"
-
     def decode(self, registers: list[int]) -> tuple[bool, bool]:
         """Decode this sensor's value."""
-        value = self._decode_raw(registers)
+        assert len(registers) == self.size
+        value = decode_uint16(registers)
         LOGGER.debug("raw value (uint16) for %s: %d", self.name, value)
         return (True, value > 0)
 
     def encode(self, value: bool) -> list[int]:
         """Encode this sensor's value."""
-        return self._encode_raw(1 if value else 0)
+        return encode_uint16(1 if value else 0)
 
     def entity_description(
         self, config_entry: ConfigEntry
@@ -161,12 +141,13 @@ class _FloatSensorAddress(IdmSensorAddress[float]):
     max_value: float | None = None
 
     @property
-    def datatype(self) -> _DataType:
-        """Get the register datatype for this sensor."""
-        return "float32"
+    def is_float(self) -> bool:
+        """Whether this sensor uses floating-point values."""
+        return True
 
     def decode(self, registers: list[int]) -> tuple[bool, float]:
-        raw_value = self._decode_raw(registers)
+        assert len(registers) == self.size
+        raw_value = decode_float32(registers, word_order="little")
         LOGGER.debug("raw value (float32) for %s: %d", self.name, raw_value)
         value = round(raw_value * self.scale, self.decimal_digits)
         LOGGER.debug("scaled & rounded value for %s: %d", self.name, value)
@@ -188,7 +169,7 @@ class _FloatSensorAddress(IdmSensorAddress[float]):
         assert (self.min_value is None or value >= self.min_value) and (
             self.max_value is None or value <= self.max_value
         )
-        return self._encode_raw(value)
+        return encode_float32(float(value), word_order="little")
 
     def entity_description(self, config_entry: ConfigEntry) -> SensorEntityDescription:
         return SensorEntityDescription(
@@ -206,13 +187,9 @@ class _UCharSensorAddress(IdmSensorAddress[int]):
     min_value: int | None = None
     max_value: int | None = 0xFFFE
 
-    @property
-    def datatype(self) -> _DataType:
-        """Get the register datatype for this sensor."""
-        return "uint16"
-
     def decode(self, registers: list[int]) -> tuple[bool, int]:
-        value = self._decode_raw(registers)
+        assert len(registers) == self.size
+        value = decode_uint16(registers)
         LOGGER.debug("raw value (uint16) for %s: %d", self.name, value)
 
         if self.max_value == 0xFFFE and value == 0xFFFF:
@@ -232,7 +209,7 @@ class _UCharSensorAddress(IdmSensorAddress[int]):
         assert (self.min_value is None or value >= self.min_value) and (
             self.max_value is None or value <= self.max_value
         )
-        return self._encode_raw(value)
+        return encode_uint16(int(value))
 
     def entity_description(self, config_entry: ConfigEntry) -> SensorEntityDescription:
         return SensorEntityDescription(
@@ -250,13 +227,9 @@ class _WordSensorAddress(IdmSensorAddress[int]):
     min_value: int | None = None
     max_value: int | None = None
 
-    @property
-    def datatype(self) -> _DataType:
-        """Get the register datatype for this sensor."""
-        return "int16"
-
     def decode(self, registers: list[int]) -> tuple[bool, int]:
-        value = self._decode_raw(registers)
+        assert len(registers) == self.size
+        value = decode_int16(registers)
 
         if self.min_value == 0 and value == -1:
             # special case: unavailable
@@ -276,7 +249,7 @@ class _WordSensorAddress(IdmSensorAddress[int]):
         assert (self.min_value is None or value >= self.min_value) and (
             self.max_value is None or value <= self.max_value
         )
-        return self._encode_raw(value)
+        return encode_int16(int(value))
 
     def entity_description(self, config_entry: ConfigEntry) -> SensorEntityDescription:
         return SensorEntityDescription(
@@ -292,13 +265,9 @@ class _WordSensorAddress(IdmSensorAddress[int]):
 class _EnumSensorAddress(IdmSensorAddress[_EnumT], Generic[_EnumT]):
     enum: type[_EnumT]
 
-    @property
-    def datatype(self) -> _DataType:
-        """Get the register datatype for this sensor."""
-        return "uint16"
-
     def decode(self, registers: list[int]) -> tuple[bool, _EnumT]:
-        value = self._decode_raw(registers)
+        assert len(registers) == self.size
+        value = decode_uint16(registers)
         LOGGER.debug("raw value (uint16) for %s: %d", self.name, value)
 
         if value == 0xFFFF and 0xFFFF not in list(map(int, self.enum)):
@@ -311,7 +280,7 @@ class _EnumSensorAddress(IdmSensorAddress[_EnumT], Generic[_EnumT]):
             raise ValueError(f"decode failed for {value}") from error
 
     def encode(self, value: _EnumT) -> list[int]:
-        return self._encode_raw(value.value)
+        return encode_uint16(value.value)
 
     def entity_description(self, config_entry: ConfigEntry) -> SensorEntityDescription:
         return SensorEntityDescription(
@@ -326,13 +295,9 @@ class _EnumSensorAddress(IdmSensorAddress[_EnumT], Generic[_EnumT]):
 class _BitFieldSensorAddress(IdmSensorAddress[_FlagT], Generic[_FlagT]):
     flag: type[_FlagT]
 
-    @property
-    def datatype(self) -> _DataType:
-        """Get the register datatype for this sensor."""
-        return "uint16"
-
     def decode(self, registers: list[int]) -> tuple[bool, _FlagT]:
-        value = self._decode_raw(registers)
+        assert len(registers) == self.size
+        value = decode_uint16(registers)
         LOGGER.debug("raw value (uint16) for %s: %d", self.name, value)
         if value == 0xFFFF:
             # special case: unavailable
@@ -344,7 +309,7 @@ class _BitFieldSensorAddress(IdmSensorAddress[_FlagT], Generic[_FlagT]):
             raise ValueError(f"decode failed for {value}") from error
 
     def encode(self, value: _FlagT) -> list[int]:
-        return self._encode_raw(value)
+        return encode_uint16(value)
 
     def entity_description(self, config_entry: ConfigEntry) -> SensorEntityDescription:
         return SensorEntityDescription(

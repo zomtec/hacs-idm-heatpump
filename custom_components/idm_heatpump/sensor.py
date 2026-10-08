@@ -32,7 +32,7 @@ _T = TypeVar("_T")
 
 def _convert_temperature(value: Any | None, entity: IdmHeatpumpEntity) -> float | int:
     value = float(value)
-    if entity.sensor_address.datatype != "float32":
+    if not entity.sensor_address.is_float:
         if int(value) != value:
             raise HomeAssistantError(
                 f"Must be integer value to use {SERVICE_SET_TEMPERATURE} on {entity.entity_id}",
